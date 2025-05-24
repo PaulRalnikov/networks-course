@@ -1,6 +1,8 @@
 import threading
 import json
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures
 
 class Router:
     inf_metric = 16
@@ -8,11 +10,16 @@ class Router:
     def __init__(self, ip, connections):
         self.ip = ip
         self.routing_table = defaultdict(lambda: {'next_hop': "--", 'metric': Router.inf_metric})
+        self.locks = defaultdict(lambda: threading.Lock())
+        self.current_step_lock = threading.Lock()
+
         self.connections = []
         for ip in connections:
             self.add_connection(ip)
+
         self.routing_table[self.ip]["next_hop"] = self.ip
         self.routing_table[self.ip]["metric"] = 0
+
         self.previous_step_updated_routers = dict()
         self.current_step_updated_routers = dict((neighbor_ip, 1) for neighbor_ip in self.connections)
 
@@ -26,11 +33,13 @@ class Router:
         updated = False
         for dest_ip, info in neighbor_routing_table.items():
             new_metric = info['metric'] + 1
-            if new_metric < self.routing_table[dest_ip]['metric']:
-                self.routing_table[dest_ip]['next_hop'] = neighbor_ip
-                self.routing_table[dest_ip]['metric'] = new_metric
-                self.current_step_updated_routers[dest_ip] = new_metric
-                updated = True
+            with self.locks[dest_ip]:
+                if new_metric < self.routing_table[dest_ip]['metric']:
+                    self.routing_table[dest_ip]['next_hop'] = neighbor_ip
+                    self.routing_table[dest_ip]['metric'] = new_metric
+                    with self.current_step_lock:
+                        self.current_step_updated_routers[dest_ip] = new_metric
+                    updated = True
         return updated
 
     def print_routing_table(self, state_name : str):
@@ -61,12 +70,20 @@ step_num = 0
 def make_step(routers):
     global step_num
     step_num += 1
-    for router in routers.values():
-        router.go_to_next_step()
+    threads = [threading.Thread(target = router.go_to_next_step()) for router in routers.values()]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     updated = False
-    for router in routers.values():
-        if router.send_messages(routers):
-            updated = True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = []
+        for router in routers.values():
+            futures.append(executor.submit(router.send_messages, routers))
+        for future in concurrent.futures.as_completed(futures):
+            if future.result():
+                updated = True
     print("=" * 100)
     for router in routers.values():
         router.print_routing_table(f"Simulation step {step_num}")
@@ -85,7 +102,6 @@ def main():
 
     while make_step(routers):
         pass
-
 
 if __name__ == "__main__":
     main()
